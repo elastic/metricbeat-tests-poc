@@ -1,0 +1,164 @@
+{
+  "consumer": {
+    "name": "E2E Testing framework"
+  },
+  "provider": {
+    "name": "Fleet"
+  },
+  "interactions": [
+    {
+      "description": "A request to get all integrations",
+      "providerState": "There are integration in the package registry",
+      "request": {
+        "method": "GET",
+        "path": "/api/fleet/epm/packages?experimental=true&category=",
+        "headers": {
+          "Authorization": "Basic ZWxhc3RpYzpjaGFuZ2VtZQ==",
+          "Content-Type": "application/json; charset=utf-8",
+          "kbn-xsrf": "e2e-tests"
+        },
+        "matchingRules": {
+          "$.path": {
+            "match": "type"
+          },
+          "$.headers.Authorization": {
+            "match": "regex",
+            "regex": "Basic *"
+          },
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          },
+          "$.headers.kbn-xsrf": {
+            "match": "type"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "body": {
+          "response": [
+            {
+              "name": "string",
+              "title": "string",
+              "version": "string"
+            }
+          ]
+        },
+        "matchingRules": {
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          },
+          "$.body.response": {
+            "min": 1
+          },
+          "$.body.response[*].*": {
+            "match": "type"
+          },
+          "$.body.response[*].name": {
+            "match": "type"
+          },
+          "$.body.response[*].title": {
+            "match": "type"
+          },
+          "$.body.response[*].version": {
+            "match": "type"
+          }
+        }
+      }
+    },
+    {
+      "description": "A request to get the Elastic Endpoint integration on its 0.16.0 version",
+      "providerState": "Integration endpoint-0.16.0 exists",
+      "request": {
+        "method": "GET",
+        "path": "/api/fleet/epm/packages/endpoint-0.16.0",
+        "headers": {
+          "Authorization": "Basic ZWxhc3RpYzpjaGFuZ2VtZQ==",
+          "Content-Type": "application/json; charset=utf-8",
+          "kbn-xsrf": "e2e-tests"
+        },
+        "matchingRules": {
+          "$.path": {
+            "match": "regex",
+            "regex": "\\/api\\/fleet\\/epm\\/packages\\/([a-zA-Z]+)-(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)"
+          },
+          "$.headers.Authorization": {
+            "match": "regex",
+            "regex": "Basic *"
+          },
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          },
+          "$.headers.kbn-xsrf": {
+            "match": "type"
+          }
+        }
+      },
+      "response": {
+        "status": 200,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "matchingRules": {
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          }
+        }
+      }
+    },
+    {
+      "description": "A request to get the Foo integration in its 1.0.0 version",
+      "providerState": "Integration Foo-1.0.0 does not exist",
+      "request": {
+        "method": "GET",
+        "path": "/api/fleet/epm/packages/foo-1.0.0",
+        "headers": {
+          "Authorization": "Basic ZWxhc3RpYzpjaGFuZ2VtZQ==",
+          "Content-Type": "application/json; charset=utf-8",
+          "kbn-xsrf": "e2e-tests"
+        },
+        "matchingRules": {
+          "$.path": {
+            "match": "regex",
+            "regex": "\\/api\\/fleet\\/epm\\/packages\\/([a-zA-Z]+)-(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)"
+          },
+          "$.headers.Authorization": {
+            "match": "regex",
+            "regex": "Basic *"
+          },
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          },
+          "$.headers.kbn-xsrf": {
+            "match": "type"
+          }
+        }
+      },
+      "response": {
+        "status": 404,
+        "headers": {
+          "Content-Type": "application/json; charset=utf-8"
+        },
+        "matchingRules": {
+          "$.headers.Content-Type": {
+            "match": "regex",
+            "regex": "application\\/json"
+          }
+        }
+      }
+    }
+  ],
+  "metadata": {
+    "pactSpecification": {
+      "version": "2.0.0"
+    }
+  }
+}

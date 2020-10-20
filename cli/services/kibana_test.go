@@ -2,13 +2,44 @@
 // or more contributor license agreements. Licensed under the Elastic License;
 // you may not use this file except in compliance with the Elastic License.
 
+// +build unit
+
 package services
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestGetIntegrations(t *testing.T) {
+	// Setup mock server
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		assert.Equal(t, req.URL.String(), ingestManagerIntegrationsURL)
+
+		body := `{"response": [
+			{
+				"name": "name-1",
+				"title": "title-1",
+				"version": "version-1",
+			},
+			{
+				"name": "name-2",
+				"title": "title-2",
+				"version": "version-2",
+			}
+		]}`
+		rw.Write([]byte(body))
+	}))
+	defer server.Close()
+
+	client := NewKibanaClient().withBaseURL(server.URL)
+
+	_, err := client.GetIntegrations()
+	assert.Nil(t, err)
+}
 
 func TestNewClient(t *testing.T) {
 	client := NewKibanaClient()
