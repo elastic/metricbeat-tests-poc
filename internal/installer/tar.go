@@ -41,15 +41,7 @@ func NewTARPackage(binaryName string, profile string, image string, service stri
 
 // Install installs a TAR package
 func (i *TARPackage) Install(cfg *kibana.FleetConfig) error {
-	// install the elastic-agent to /usr/bin/elastic-agent using command
-	binary := fmt.Sprintf("/elastic-agent/%s", i.artifact)
-	args := cfg.Flags()
-
-	err := runElasticAgentCommandEnv(i.profile, i.image, i.service, binary, "install", args, map[string]string{})
-	if err != nil {
-		return fmt.Errorf("Failed to install the agent with subcommand: %v", err)
-	}
-
+	log.Trace("No install commands for TAR packages")
 	return nil
 }
 
@@ -183,7 +175,9 @@ func newTarInstaller(image string, tag string, version string, fleetServerHost s
 	logFile := logsDir + "/" + logFileName
 
 	enrollFn := func(cfg *kibana.FleetConfig) error {
-		return runElasticAgentCommandEnv(profile, dockerImage, service, common.ElasticAgentProcessName, "enroll", cfg.Flags(), map[string]string{})
+		// update path to elastic-agent binary
+		dstBinary := fmt.Sprintf("/elastic-agent/%s", common.ElasticAgentProcessName)
+		return runElasticAgentCommandEnv(profile, dockerImage, service, dstBinary, "install", cfg.Flags(), map[string]string{})
 	}
 
 	//

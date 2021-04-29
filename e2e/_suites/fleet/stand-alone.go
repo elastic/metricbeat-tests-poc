@@ -7,10 +7,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"github.com/elastic/e2e-testing/cli/config"
 	"path"
 	"strings"
 	"time"
+
+	"github.com/elastic/e2e-testing/cli/config"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/cucumber/godog"
@@ -54,7 +55,7 @@ func (sats *StandAloneTestSuite) afterScenario() {
 		log.WithField("service", serviceName).Info("Because we are running in development mode, the service won't be stopped")
 	}
 
-	sats.kibanaClient.DeleteAllPolicies(sats.FleetPolicy)
+	sats.kibanaClient.DeleteAllPolicies()
 }
 
 func (sats *StandAloneTestSuite) contributeSteps(s *godog.ScenarioContext) {
