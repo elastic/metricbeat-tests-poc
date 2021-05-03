@@ -8,15 +8,14 @@ import (
 	"context"
 	"strings"
 
-	"github.com/elastic/e2e-testing/internal/common"
 	log "github.com/sirupsen/logrus"
 )
 
 // Deployment interface for operations dealing with deployments of the bits
 // required for testing
 type Deployment interface {
-	Add(services []string, env map[string]string) error    // adds a service to deployment
-	Bootstrap() error                                      // Bootstraps an environment to test
+	Add(services []string, env map[string]string) error // adds a service to deployment
+	Bootstrap() error
 	Destroy() error                                        // Teardown deployment
 	Inspect(service string) (*ServiceManifest, error)      // inspects service
 	Remove(services []string, env map[string]string) error // Removes services from deployment
@@ -37,16 +36,15 @@ type ServiceManifest struct {
 	Hostname   string
 }
 
-// NewClient loads deployment manifest for supported provider
-func NewClient() Deployment {
-	provider := strings.ToLower(common.Provider)
-	switch provider {
-	case "docker":
-		return NewDockerDeployment()
-	case "kubernetes":
-		return NewKubernetesDeployment()
-	default:
-		log.WithField("provider", common.Provider).Fatal("Unknown deployment provider")
+// New creates a new deployment
+func New(provider string) Deployment {
+	if strings.EqualFold(provider, "docker") {
+		log.Trace("Docker Deployment Selected")
+		return newDockerDeploy()
+	}
+	if strings.EqualFold(provider, "kubernetes") {
+		log.Trace("Kubernetes Deployment Selected")
+		return newK8sDeploy()
 	}
 	return nil
 }

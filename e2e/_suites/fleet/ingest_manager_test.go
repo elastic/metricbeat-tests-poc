@@ -32,8 +32,7 @@ func setUpSuite() {
 		os.Exit(1)
 	}
 
-	deployer := deploy.NewClient()
-
+	common.Provider = shell.GetEnv("PROVIDER", common.Provider)
 	developerMode := shell.GetEnvBool("DEVELOPER_MODE")
 	if developerMode {
 		log.Info("Running in Developer mode 💻: runtime dependencies between different test runs will be reused to speed up dev cycle")
@@ -88,7 +87,7 @@ func setUpSuite() {
 	imts = IngestManagerTestSuite{
 		Fleet: &FleetTestSuite{
 			kibanaClient: kibanaClient,
-			deployer:     deployer,
+			deployer:     deploy.New(common.Provider),
 			Installers:   map[string]installer.ElasticAgentInstaller{}, // do not pre-initialise the map
 			ctx:          context.Background(),
 		},
@@ -126,7 +125,6 @@ func InitializeIngestManagerTestScenario(ctx *godog.ScenarioContext) {
 }
 
 func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
-	deployer := deploy.NewClient()
 	developerMode := shell.GetEnvBool("DEVELOPER_MODE")
 
 	ctx.BeforeSuite(func() {
@@ -134,6 +132,7 @@ func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
 
 		log.Trace("Bootstrapping Fleet Server")
 
+		deployer := deploy.New(common.Provider)
 		deployer.Bootstrap()
 
 		serviceManifest, err := deployer.Inspect("fleet-server")
@@ -151,6 +150,7 @@ func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
 	ctx.AfterSuite(func() {
 		if !developerMode {
 			log.Debug("Destroying Fleet runtime dependencies")
+			deployer := deploy.New(common.Provider)
 			deployer.Destroy()
 		}
 

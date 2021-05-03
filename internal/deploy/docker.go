@@ -18,19 +18,18 @@ import (
 
 // DockerDeploymentManifest deploy manifest for docker
 type dockerDeploymentManifest struct {
-	ctx context.Context
+	Context context.Context
 }
 
-// NewDockerDeployment initializes docker deployment
-func NewDockerDeployment() Deployment {
-	return &dockerDeploymentManifest{ctx: context.Background()}
+func newDockerDeploy() Deployment {
+	return &dockerDeploymentManifest{Context: context.Background()}
 }
 
 // Add adds services deployment
 func (c *dockerDeploymentManifest) Add(services []string, env map[string]string) error {
 	serviceManager := compose.NewServiceManager()
 
-	return serviceManager.AddServicesToCompose(c.ctx, services[0], services[1:], env)
+	return serviceManager.AddServicesToCompose(c.Context, services[0], services[1:], env)
 }
 
 // Bootstrap sets up environment with docker compose
@@ -48,7 +47,7 @@ func (c *dockerDeploymentManifest) Bootstrap() error {
 	}
 
 	profile := common.FleetProfileName
-	err := serviceManager.RunCompose(c.ctx, true, []string{profile}, common.ProfileEnv)
+	err := serviceManager.RunCompose(c.Context, true, []string{profile}, common.ProfileEnv)
 	if err != nil {
 		log.WithFields(log.Fields{
 			"profile": profile,
@@ -71,7 +70,7 @@ func (c *dockerDeploymentManifest) Bootstrap() error {
 // Destroy teardown docker environment
 func (c *dockerDeploymentManifest) Destroy() error {
 	serviceManager := compose.NewServiceManager()
-	err := serviceManager.StopCompose(c.ctx, true, []string{common.FleetProfileName})
+	err := serviceManager.StopCompose(c.Context, true, []string{common.FleetProfileName})
 	if err != nil {
 		log.WithFields(log.Fields{
 			"error":   err,
@@ -99,5 +98,5 @@ func (c *dockerDeploymentManifest) Inspect(service string) (*ServiceManifest, er
 func (c *dockerDeploymentManifest) Remove(services []string, env map[string]string) error {
 	serviceManager := compose.NewServiceManager()
 
-	return serviceManager.RemoveServicesFromCompose(c.ctx, services[0], services[1:], env)
+	return serviceManager.RemoveServicesFromCompose(c.Context, services[0], services[1:], env)
 }

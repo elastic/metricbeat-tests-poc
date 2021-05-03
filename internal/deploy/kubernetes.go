@@ -8,52 +8,43 @@ import (
 	"context"
 	"strings"
 
-	"github.com/elastic/e2e-testing/internal/common"
 	"github.com/elastic/e2e-testing/internal/compose"
 	"github.com/elastic/e2e-testing/internal/docker"
 	"github.com/elastic/e2e-testing/internal/kibana"
-	"github.com/elastic/e2e-testing/internal/utils"
+	"github.com/elastic/e2e-testing/internal/kubernetes"
 	log "github.com/sirupsen/logrus"
 )
 
+var cluster kubernetes.Cluster
+var kubectl kubernetes.Control
+
 // KubernetesDeploymentManifest deploy manifest for kubernetes
 type kubernetesDeploymentManifest struct {
-	ctx context.Context
+	Context context.Context
 }
 
-// NewKubernetesDeployment initializes docker deployment
-func NewKubernetesDeployment() Deployment {
-	return &kubernetesDeploymentManifest{ctx: context.Background()}
+func newK8sDeploy() Deployment {
+	return &kubernetesDeploymentManifest{Context: context.Background()}
 }
 
 // Add adds services deployment
 func (c *kubernetesDeploymentManifest) Add(services []string, env map[string]string) error {
 	serviceManager := compose.NewServiceManager()
 
-	return serviceManager.AddServicesToCompose(c.ctx, services[0], services[1:], env)
+	return serviceManager.AddServicesToCompose(c.Context, services[0], services[1:], env)
 }
 
 // Bootstrap sets up environment with docker compose
 func (c *kubernetesDeploymentManifest) Bootstrap() error {
-	serviceManager := compose.NewServiceManager()
-	common.ProfileEnv = map[string]string{
-		"kibanaVersion": common.KibanaVersion,
-		"stackVersion":  common.StackVersion,
-	}
-
-	common.ProfileEnv["kibanaDockerNamespace"] = "kibana"
-	if strings.HasPrefix(common.KibanaVersion, "pr") || utils.IsCommit(common.KibanaVersion) {
-		// because it comes from a PR
-		common.ProfileEnv["kibanaDockerNamespace"] = "observability-ci"
-	}
-
-	profile := common.FleetProfileName
-	err := serviceManager.RunCompose(c.ctx, true, []string{profile}, common.ProfileEnv)
+	err := cluster.Initialize(c.Context, "../../../cli/config/kubernetes/kind.yaml")
 	if err != nil {
-		log.WithFields(log.Fields{
-			"profile": profile,
-			"error":   err.Error(),
-		}).Fatal("Could not run the runtime dependencies for the profile.")
+		return err
+	}
+
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+	_, err = kubectl.Run(c.Context, "apply", "-k", "../../../cli/config/kubernetes/base")
+	if err != nil {
+		return err
 	}
 
 	kibanaClient, err := kibana.NewClient()
@@ -70,14 +61,14 @@ func (c *kubernetesDeploymentManifest) Bootstrap() error {
 
 // Destroy teardown docker environment
 func (c *kubernetesDeploymentManifest) Destroy() error {
-	serviceManager := compose.NewServiceManager()
-	err := serviceManager.StopCompose(c.ctx, true, []string{common.FleetProfileName})
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"profile": common.FleetProfileName,
-		}).Fatal("Could not destroy the runtime dependencies for the profile.")
-	}
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "")
+	// err = cluster.Cleanup(c.Context)
+	// if err != nil {
+	// 	log.WithFields(log.Fields{
+	// 		"error":   err,
+	// 		"profile": common.FleetProfileName,
+	// 	}).Fatal("Could not destroy the runtime dependencies for the profile.")
+	// }
 	return nil
 }
 
@@ -99,5 +90,5 @@ func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest
 func (c *kubernetesDeploymentManifest) Remove(services []string, env map[string]string) error {
 	serviceManager := compose.NewServiceManager()
 
-	return serviceManager.RemoveServicesFromCompose(c.ctx, services[0], services[1:], env)
+	return serviceManager.RemoveServicesFromCompose(c.Context, services[0], services[1:], env)
 }
