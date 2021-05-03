@@ -7,9 +7,9 @@ package deploy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 
-	"github.com/elastic/e2e-testing/internal/compose"
 	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/kubernetes"
 	"github.com/pkg/errors"
@@ -30,12 +30,18 @@ func newK8sDeploy() Deployment {
 
 // Add adds services deployment
 func (c *kubernetesDeploymentManifest) Add(services []string, env map[string]string) error {
-	serviceManager := compose.NewServiceManager()
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
 
-	return serviceManager.AddServicesToCompose(c.Context, services[0], services[1:], env)
+	for _, service := range services {
+		_, err := kubectl.Run(c.Context, "apply", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
-// Bootstrap sets up environment with docker compose
+// Bootstrap sets up environment with kind
 func (c *kubernetesDeploymentManifest) Bootstrap() error {
 	err := cluster.Initialize(c.Context, "../../../cli/config/kubernetes/kind.yaml")
 	if err != nil {
@@ -60,7 +66,7 @@ func (c *kubernetesDeploymentManifest) Bootstrap() error {
 	return nil
 }
 
-// Destroy teardown docker environment
+// Destroy teardown kubernetes environment
 func (c *kubernetesDeploymentManifest) Destroy() error {
 	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
 	cluster.Cleanup(c.Context)
@@ -77,7 +83,7 @@ type kubernetesServiceManifest struct {
 // Inspect inspects a service
 func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest, error) {
 	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
-	out, err := kubectl.Run(c.Context, "get", "svc/"+service, "-o", "json")
+	out, err := kubectl.Run(c.Context, "get", "deployment/"+service, "-o", "json")
 	if err != nil {
 		return &ServiceManifest{}, err
 	}
@@ -95,7 +101,13 @@ func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest
 
 // Remove remove services from deployment
 func (c *kubernetesDeploymentManifest) Remove(services []string, env map[string]string) error {
-	serviceManager := compose.NewServiceManager()
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
 
-	return serviceManager.RemoveServicesFromCompose(c.Context, services[0], services[1:], env)
+	for _, service := range services {
+		_, err := kubectl.Run(c.Context, "delete", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -18,3 +18,8 @@ spec:
       - name: elastic-agent
         image: centos/systemd:latest
         command: ["/usr/sbin/init"]
+        securityContext:
+          allowPrivilegeEscalation: true
+          runAsUser: 0
+          capabilities:
+            add: ["SYS_ADMIN"]
