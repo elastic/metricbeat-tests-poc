@@ -6,12 +6,13 @@ package deploy
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"github.com/elastic/e2e-testing/internal/compose"
-	"github.com/elastic/e2e-testing/internal/docker"
 	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/kubernetes"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -61,28 +62,34 @@ func (c *kubernetesDeploymentManifest) Bootstrap() error {
 
 // Destroy teardown docker environment
 func (c *kubernetesDeploymentManifest) Destroy() error {
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "")
-	// err = cluster.Cleanup(c.Context)
-	// if err != nil {
-	// 	log.WithFields(log.Fields{
-	// 		"error":   err,
-	// 		"profile": common.FleetProfileName,
-	// 	}).Fatal("Could not destroy the runtime dependencies for the profile.")
-	// }
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+	cluster.Cleanup(c.Context)
 	return nil
+}
+
+type kubernetesServiceManifest struct {
+	Metadata struct {
+		Name string `json:"name"`
+		ID   string `json:"uid"`
+	} `json:"metadata"`
 }
 
 // Inspect inspects a service
 func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest, error) {
-	inspect, err := docker.InspectContainer(service)
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+	out, err := kubectl.Run(c.Context, "get", "svc/"+service, "-o", "json")
 	if err != nil {
 		return &ServiceManifest{}, err
 	}
+	var inspect kubernetesServiceManifest
+	if err = json.Unmarshal([]byte(out), &inspect); err != nil {
+		return &ServiceManifest{}, errors.Wrap(err, "Could not convert metadata to JSON")
+	}
 	return &ServiceManifest{
-		ID:         inspect.ID,
-		Name:       strings.TrimPrefix(inspect.Name, "/"),
+		ID:         inspect.Metadata.ID,
+		Name:       strings.TrimPrefix(inspect.Metadata.Name, "/"),
 		Connection: service,
-		Hostname:   inspect.NetworkSettings.Networks["fleet_default"].Aliases[0],
+		Hostname:   service,
 	}, nil
 }
 
