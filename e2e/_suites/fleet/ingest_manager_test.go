@@ -14,6 +14,7 @@ import (
 	"github.com/elastic/e2e-testing/cli/config"
 	"github.com/elastic/e2e-testing/internal/common"
 	"github.com/elastic/e2e-testing/internal/deploy"
+	"github.com/elastic/e2e-testing/internal/docker"
 	"github.com/elastic/e2e-testing/internal/installer"
 	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/shell"
@@ -48,7 +49,6 @@ func setUpSuite() {
 	}
 	common.AgentVersionBase = v
 
-	common.TimeoutFactor = shell.GetEnvInteger("TIMEOUT_FACTOR", common.TimeoutFactor)
 	common.AgentVersion = shell.GetEnv("BEAT_VERSION", common.AgentVersionBase)
 
 	// check if version is an alias
@@ -91,37 +91,23 @@ func setUpSuite() {
 			Installers:   map[string]installer.ElasticAgentInstaller{}, // do not pre-initialise the map
 			ctx:          context.Background(),
 		},
-		StandAlone: &StandAloneTestSuite{
-			kibanaClient: kibanaClient,
-		},
 	}
 }
 
 func InitializeIngestManagerTestScenario(ctx *godog.ScenarioContext) {
 	ctx.BeforeScenario(func(*messages.Pickle) {
 		log.Trace("Before Fleet scenario")
-
-		imts.StandAlone.Cleanup = false
-
 		imts.Fleet.beforeScenario()
 	})
 
 	ctx.AfterScenario(func(*messages.Pickle, error) {
 		log.Trace("After Fleet scenario")
-
-		if imts.StandAlone.Cleanup {
-			imts.StandAlone.afterScenario()
-		}
-
-		if imts.Fleet.Cleanup {
-			imts.Fleet.afterScenario()
-		}
+		imts.Fleet.afterScenario()
 	})
 
 	ctx.Step(`^the "([^"]*)" process is in the "([^"]*)" state on the host$`, imts.processStateOnTheHost)
 
 	imts.Fleet.contributeSteps(ctx)
-	imts.StandAlone.contributeSteps(ctx)
 }
 
 func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
@@ -131,6 +117,11 @@ func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
 		setUpSuite()
 
 		log.Trace("Bootstrapping Fleet Server")
+
+		if !shell.GetEnvBool("SKIP_PULL") {
+			log.Info("Pulling Docker images...")
+			docker.PullImages(common.StackVersion, common.AgentVersion, common.KibanaVersion)
+		}
 
 		deployer := deploy.New(common.Provider)
 		deployer.Bootstrap(func() error {
@@ -154,7 +145,7 @@ func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
 		log.WithField("manifest", serviceManifest).Trace("Discovered Fleet Server hostname")
 
 		imts.Fleet.Version = common.AgentVersionBase
-		imts.StandAlone.RuntimeDependenciesStartDate = time.Now().UTC()
+		imts.Fleet.RuntimeDependenciesStartDate = time.Now().UTC()
 	})
 
 	ctx.AfterSuite(func() {
