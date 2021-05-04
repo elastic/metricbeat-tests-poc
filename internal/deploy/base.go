@@ -12,8 +12,9 @@ import (
 // required for testing
 type Deployment interface {
 	Add(services []string, env map[string]string) error    // adds a service to deployment
-	Bootstrap() error                                      // will bootstrap or reuse existing cluster if kubernetes is selected
+	Bootstrap(waitCB func() error) error                   // will bootstrap or reuse existing cluster if kubernetes is selected
 	Destroy() error                                        // Teardown deployment
+	ExecIn(service string, cmd []string) (string, error)   // Execute arbitrary commands in service
 	Inspect(service string) (*ServiceManifest, error)      // inspects service
 	Remove(services []string, env map[string]string) error // Removes services from deployment
 }

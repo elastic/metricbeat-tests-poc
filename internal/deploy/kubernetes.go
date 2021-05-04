@@ -10,10 +10,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/kubernetes"
 	"github.com/pkg/errors"
-	log "github.com/sirupsen/logrus"
 )
 
 var cluster kubernetes.Cluster
@@ -42,7 +40,7 @@ func (c *kubernetesDeploymentManifest) Add(services []string, env map[string]str
 }
 
 // Bootstrap sets up environment with kind
-func (c *kubernetesDeploymentManifest) Bootstrap() error {
+func (c *kubernetesDeploymentManifest) Bootstrap(waitCB func() error) error {
 	err := cluster.Initialize(c.Context, "../../../cli/config/kubernetes/kind.yaml")
 	if err != nil {
 		return err
@@ -53,15 +51,9 @@ func (c *kubernetesDeploymentManifest) Bootstrap() error {
 	if err != nil {
 		return err
 	}
-
-	kibanaClient, err := kibana.NewClient()
+	err = waitCB()
 	if err != nil {
-		log.WithField("error", err).Fatal("Unable to create kibana client")
-	}
-
-	err = kibanaClient.WaitForFleet()
-	if err != nil {
-		log.WithField("error", err).Fatal("Fleet could not be initialized")
+		return err
 	}
 	return nil
 }
@@ -71,6 +63,20 @@ func (c *kubernetesDeploymentManifest) Destroy() error {
 	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
 	cluster.Cleanup(c.Context)
 	return nil
+}
+
+// ExecIn execute command in service
+func (c *kubernetesDeploymentManifest) ExecIn(service string, cmd []string) (string, error) {
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+	args := []string{"exec", "deployment/" + service, "--"}
+	for _, arg := range cmd {
+		args = append(cmd, arg)
+	}
+	output, err := kubectl.Run(c.Context, args...)
+	if err != nil {
+		return "", err
+	}
+	return output, nil
 }
 
 type kubernetesServiceManifest struct {

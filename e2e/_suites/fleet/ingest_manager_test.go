@@ -133,7 +133,17 @@ func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
 		log.Trace("Bootstrapping Fleet Server")
 
 		deployer := deploy.New(common.Provider)
-		deployer.Bootstrap()
+		deployer.Bootstrap(func() error {
+			kibanaClient, err := kibana.NewClient()
+			if err != nil {
+				log.WithField("error", err).Fatal("Unable to create kibana client")
+			}
+			err = kibanaClient.WaitForFleet()
+			if err != nil {
+				log.WithField("error", err).Fatal("Fleet could not be initialized")
+			}
+			return nil
+		})
 
 		serviceManifest, err := deployer.Inspect("fleet-server")
 		if err != nil {

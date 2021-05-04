@@ -11,7 +11,6 @@ import (
 	"github.com/elastic/e2e-testing/internal/common"
 	"github.com/elastic/e2e-testing/internal/compose"
 	"github.com/elastic/e2e-testing/internal/docker"
-	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/utils"
 	log "github.com/sirupsen/logrus"
 )
@@ -33,7 +32,7 @@ func (c *dockerDeploymentManifest) Add(services []string, env map[string]string)
 }
 
 // Bootstrap sets up environment with docker compose
-func (c *dockerDeploymentManifest) Bootstrap() error {
+func (c *dockerDeploymentManifest) Bootstrap(waitCB func() error) error {
 	serviceManager := compose.NewServiceManager()
 	common.ProfileEnv = map[string]string{
 		"kibanaVersion": common.KibanaVersion,
@@ -54,15 +53,9 @@ func (c *dockerDeploymentManifest) Bootstrap() error {
 			"error":   err.Error(),
 		}).Fatal("Could not run the runtime dependencies for the profile.")
 	}
-
-	kibanaClient, err := kibana.NewClient()
+	err = waitCB()
 	if err != nil {
-		log.WithField("error", err).Fatal("Unable to create kibana client")
-	}
-
-	err = kibanaClient.WaitForFleet()
-	if err != nil {
-		log.WithField("error", err).Fatal("Fleet could not be initialized")
+		return err
 	}
 	return nil
 }
@@ -78,6 +71,15 @@ func (c *dockerDeploymentManifest) Destroy() error {
 		}).Fatal("Could not destroy the runtime dependencies for the profile.")
 	}
 	return nil
+}
+
+// ExecIn execute command in service
+func (c *dockerDeploymentManifest) ExecIn(service string, cmd []string) (string, error) {
+	output, err := docker.ExecCommandIntoContainer(c.Context, service, "root", cmd)
+	if err != nil {
+		return "", err
+	}
+	return output, nil
 }
 
 // Inspect inspects a service
