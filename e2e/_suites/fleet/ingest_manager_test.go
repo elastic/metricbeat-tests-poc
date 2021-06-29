@@ -5,23 +5,30 @@
 package main
 
 import (
+	"context"
 	"os"
+	"strings"
+	"testing"
 	"time"
 
 	"github.com/cucumber/godog"
+	"github.com/cucumber/godog/colors"
 	"github.com/cucumber/messages-go/v10"
 	"github.com/elastic/e2e-testing/cli/config"
 	"github.com/elastic/e2e-testing/internal/common"
 	"github.com/elastic/e2e-testing/internal/deploy"
-	"github.com/elastic/e2e-testing/internal/docker"
-	"github.com/elastic/e2e-testing/internal/installer"
 	"github.com/elastic/e2e-testing/internal/kibana"
 	"github.com/elastic/e2e-testing/internal/shell"
 	"github.com/elastic/e2e-testing/internal/utils"
 	log "github.com/sirupsen/logrus"
+	flag "github.com/spf13/pflag"
+	"go.elastic.co/apm"
 )
 
 var imts IngestManagerTestSuite
+
+var tx *apm.Transaction
+var stepSpan *apm.Span
 
 func setUpSuite() {
 	config.Init()
@@ -32,148 +39,188 @@ func setUpSuite() {
 		os.Exit(1)
 	}
 
-	common.Provider = shell.GetEnv("PROVIDER", common.Provider)
-	developerMode := shell.GetEnvBool("DEVELOPER_MODE")
-	if developerMode {
-		log.Info("Running in Developer mode 💻: runtime dependencies between different test runs will be reused to speed up dev cycle")
-	}
-
-	// check if base version is an alias
-	v, err := utils.GetElasticArtifactVersion(common.AgentVersionBase)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"version": common.AgentVersionBase,
-		}).Fatal("Failed to get agent base version, aborting")
-	}
-	common.AgentVersionBase = v
-
-	common.AgentVersion = shell.GetEnv("BEAT_VERSION", common.AgentVersionBase)
-
-	// check if version is an alias
-	v, err = utils.GetElasticArtifactVersion(common.AgentVersion)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"version": common.AgentVersion,
-		}).Fatal("Failed to get agent version, aborting")
-	}
-	common.AgentVersion = v
-
-	common.StackVersion = shell.GetEnv("STACK_VERSION", common.StackVersion)
-	v, err = utils.GetElasticArtifactVersion(common.StackVersion)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"version": common.StackVersion,
-		}).Fatal("Failed to get stack version, aborting")
-	}
-	common.StackVersion = v
-
-	common.KibanaVersion = shell.GetEnv("KIBANA_VERSION", "")
-	if common.KibanaVersion == "" {
-		// we want to deploy a released version for Kibana
-		// if not set, let's use stackVersion
-		common.KibanaVersion, err = utils.GetElasticArtifactVersion(common.StackVersion)
-		if err != nil {
-			log.WithFields(log.Fields{
-				"error":   err,
-				"version": common.KibanaVersion,
-			}).Fatal("Failed to get kibana version, aborting")
-		}
-	}
+	common.InitVersions()
 
 	imts = IngestManagerTestSuite{
 		Fleet: &FleetTestSuite{
 			kibanaClient: kibanaClient,
 			deployer:     deploy.New(common.Provider),
-			Installers:   map[string]installer.ElasticAgentInstaller{}, // do not pre-initialise the map
 		},
 	}
 }
 
 func InitializeIngestManagerTestScenario(ctx *godog.ScenarioContext) {
-	ctx.BeforeScenario(func(*messages.Pickle) {
+	ctx.BeforeScenario(func(p *messages.Pickle) {
 		log.Trace("Before Fleet scenario")
+
+		tx = apm.DefaultTracer.StartTransaction(p.GetName(), "test.scenario")
+		tx.Context.SetLabel("suite", "fleet")
+
+		// context is initialised at the step hook, we are initialising it here to prevent panics
+		imts.Fleet.currentContext = context.Background()
 		imts.Fleet.beforeScenario()
 	})
 
-	ctx.AfterScenario(func(*messages.Pickle, error) {
+	ctx.AfterScenario(func(p *messages.Pickle, err error) {
 		log.Trace("After Fleet scenario")
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("scenario", p.GetName())
+			e.Context.SetLabel("gherkin_type", "scenario")
+			e.Send()
+		}
+
+		f := func() {
+			tx.End()
+
+			apm.DefaultTracer.Flush(nil)
+		}
+		defer f()
+
 		imts.Fleet.afterScenario()
 	})
 
+	ctx.BeforeStep(func(step *godog.Step) {
+		stepSpan = tx.StartSpan(step.GetText(), "test.scenario.step", nil)
+		imts.Fleet.currentContext = apm.ContextWithSpan(context.Background(), stepSpan)
+	})
+	ctx.AfterStep(func(st *godog.Step, err error) {
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("step", st.GetText())
+			e.Context.SetLabel("gherkin_type", "step")
+			e.Send()
+		}
+
+		if stepSpan != nil {
+			stepSpan.End()
+		}
+	})
+
 	ctx.Step(`^the "([^"]*)" process is in the "([^"]*)" state on the host$`, imts.processStateOnTheHost)
+	ctx.Step(`^there are "([^"]*)" instances of the "([^"]*)" process in the "([^"]*)" state$`, imts.thereAreInstancesOfTheProcessInTheState)
 
 	imts.Fleet.contributeSteps(ctx)
 }
 
 func InitializeIngestManagerTestSuite(ctx *godog.TestSuiteContext) {
-	developerMode := shell.GetEnvBool("DEVELOPER_MODE")
-
 	ctx.BeforeSuite(func() {
 		setUpSuite()
 
-		log.Trace("Bootstrapping Fleet Server")
+		var suiteTx *apm.Transaction
+		var suiteParentSpan *apm.Span
+		var suiteContext = context.Background()
 
-		if !shell.GetEnvBool("SKIP_PULL") {
+		// instrumentation
+		defer apm.DefaultTracer.Flush(nil)
+		suiteTx = apm.DefaultTracer.StartTransaction("Initialise Fleet", "test.suite")
+		defer suiteTx.End()
+		suiteParentSpan = suiteTx.StartSpan("Before Fleet test suite", "test.suite.before", nil)
+		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
+		defer suiteParentSpan.End()
+
+		deployer := deploy.New(common.Provider)
+
+		err := deployer.PreBootstrap(suiteContext)
+		if err != nil {
+			log.WithField("error", err).Fatal("Unable to run pre-bootstrap initialization")
+		}
+
+		// FIXME: This needs to go into deployer code for docker somehow. Must resolve
+		// cyclic imports since common.defaults now imports deploy module
+		if !shell.GetEnvBool("SKIP_PULL") && shell.GetEnv("PROVIDER", "docker") != "remote" {
 			images := []string{
-				"docker.elastic.co/beats/elastic-agent:" + common.AgentVersion,
-				"docker.elastic.co/beats/elastic-agent-ubi8:" + common.AgentVersion,
+				"docker.elastic.co/beats/elastic-agent:" + common.BeatVersion,
+				"docker.elastic.co/beats/elastic-agent-ubi8:" + common.BeatVersion,
 				"docker.elastic.co/elasticsearch/elasticsearch:" + common.StackVersion,
 				"docker.elastic.co/kibana/kibana:" + common.KibanaVersion,
-				"docker.elastic.co/observability-ci/elastic-agent:" + common.AgentVersion,
-				"docker.elastic.co/observability-ci/elastic-agent-ubi8:" + common.AgentVersion,
+				"docker.elastic.co/observability-ci/elastic-agent:" + common.BeatVersion,
+				"docker.elastic.co/observability-ci/elastic-agent-ubi8:" + common.BeatVersion,
 				"docker.elastic.co/observability-ci/elasticsearch:" + common.StackVersion,
 				"docker.elastic.co/observability-ci/elasticsearch-ubi8:" + common.StackVersion,
 				"docker.elastic.co/observability-ci/kibana:" + common.KibanaVersion,
 				"docker.elastic.co/observability-ci/kibana-ubi8:" + common.KibanaVersion,
 			}
-			docker.PullImages(images)
+			deploy.PullImages(suiteContext, images)
 		}
 
-		deployer := deploy.New(common.Provider)
-		deployer.Bootstrap(func() error {
+		common.ProfileEnv = map[string]string{
+			"kibanaVersion": common.KibanaVersion,
+			"stackPlatform": "linux/" + utils.GetArchitecture(),
+			"stackVersion":  common.StackVersion,
+		}
+
+		common.ProfileEnv["kibanaDockerNamespace"] = "kibana"
+		if strings.HasPrefix(common.KibanaVersion, "pr") || utils.IsCommit(common.KibanaVersion) {
+			// because it comes from a PR
+			common.ProfileEnv["kibanaDockerNamespace"] = "observability-ci"
+		}
+
+		deployer.Bootstrap(suiteContext, common.FleetProfileServiceRequest, common.ProfileEnv, func() error {
 			kibanaClient, err := kibana.NewClient()
 			if err != nil {
 				log.WithField("error", err).Fatal("Unable to create kibana client")
 			}
-			err = kibanaClient.WaitForFleet()
+			err = kibanaClient.WaitForFleet(suiteContext)
 			if err != nil {
 				log.WithField("error", err).Fatal("Fleet could not be initialized")
 			}
 			return nil
 		})
 
-		imts.Fleet.Version = common.AgentVersionBase
+		imts.Fleet.Version = common.BeatVersionBase
 		imts.Fleet.RuntimeDependenciesStartDate = time.Now().UTC()
 	})
 
 	ctx.AfterSuite(func() {
-		if !developerMode {
+		f := func() {
+			apm.DefaultTracer.Flush(nil)
+		}
+		defer f()
+
+		// instrumentation
+		var suiteTx *apm.Transaction
+		var suiteParentSpan *apm.Span
+		var suiteContext = context.Background()
+		defer apm.DefaultTracer.Flush(nil)
+		suiteTx = apm.DefaultTracer.StartTransaction("Tear Down Fleet", "test.suite")
+		defer suiteTx.End()
+		suiteParentSpan = suiteTx.StartSpan("After Fleet test suite", "test.suite.after", nil)
+		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
+		defer suiteParentSpan.End()
+
+		if !common.DeveloperMode {
 			log.Debug("Destroying Fleet runtime dependencies")
 			deployer := deploy.New(common.Provider)
-			deployer.Destroy()
-		}
-
-		installers := imts.Fleet.Installers
-		for k, v := range installers {
-			agentPath := v.BinaryPath
-			if _, err := os.Stat(agentPath); err == nil {
-				err = os.Remove(agentPath)
-				if err != nil {
-					log.WithFields(log.Fields{
-						"err":       err,
-						"installer": k,
-						"path":      agentPath,
-					}).Warn("Elastic Agent binary could not be removed.")
-				} else {
-					log.WithFields(log.Fields{
-						"installer": k,
-						"path":      agentPath,
-					}).Debug("Elastic Agent binary was removed.")
-				}
-			}
+			deployer.Destroy(suiteContext, common.FleetProfileServiceRequest)
 		}
 	})
+}
+
+var opts = godog.Options{
+	Output: colors.Colored(os.Stdout),
+	Format: "progress", // can define default values
+}
+
+func init() {
+	godog.BindCommandLineFlags("godog.", &opts) // godog v0.11.0 (latest)
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	opts.Paths = flag.Args()
+
+	status := godog.TestSuite{
+		Name:                 "godogs",
+		TestSuiteInitializer: InitializeIngestManagerTestSuite,
+		ScenarioInitializer:  InitializeIngestManagerTestScenario,
+		Options:              &opts,
+	}.Run()
+
+	// Optional: Run `testing` package's logic besides godog.
+	if st := m.Run(); st > status {
+		status = st
+	}
+
+	os.Exit(status)
 }

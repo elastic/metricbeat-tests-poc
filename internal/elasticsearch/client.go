@@ -9,13 +9,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	backoff "github.com/cenkalti/backoff/v4"
-	"github.com/elastic/e2e-testing/internal/common"
 	curl "github.com/elastic/e2e-testing/internal/curl"
 	"github.com/elastic/e2e-testing/internal/shell"
+	"github.com/elastic/e2e-testing/internal/utils"
 	es "github.com/elastic/go-elasticsearch/v8"
 	log "github.com/sirupsen/logrus"
 	"go.elastic.co/apm"
@@ -36,6 +39,12 @@ type SearchResult map[string]interface{}
 
 // DeleteIndex deletes an index from the elasticsearch running in the host
 func DeleteIndex(ctx context.Context, index string) error {
+	span, _ := apm.StartSpanOptions(ctx, "Search", "elasticsearch.index.delete", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("index", index)
+	defer span.End()
+
 	esClient, err := getElasticsearchClient(ctx)
 	if err != nil {
 		return err
@@ -78,6 +87,16 @@ func DeleteIndex(ctx context.Context, index string) error {
 // random port at localhost, we will build the URL with the bound port at localhost.
 //nolint:unused
 func getElasticsearchClient(ctx context.Context) (*es.Client, error) {
+	remoteESHost := shell.GetEnv("ELASTICSEARCH_URL", "")
+	if remoteESHost != "" {
+		u, err := url.Parse(remoteESHost)
+		host, port, err := net.SplitHostPort(u.Host)
+		if err != nil {
+			log.Fatal("Could not determine host/port from ELASTICSEARCH_URL")
+		}
+		remoteESHostPort, _ := strconv.Atoi(port)
+		return getElasticsearchClientFromHostPort(ctx, host, remoteESHostPort)
+	}
 	return getElasticsearchClientFromHostPort(ctx, "localhost", 9200)
 }
 
@@ -97,6 +116,7 @@ func getElasticsearchClientFromHostPort(ctx context.Context, host string, port i
 		Password:  "changeme",
 	}
 
+	// avoid using common properties to avoid cyclical references
 	elasticAPMActive := shell.GetEnvBool("ELASTIC_APM_ACTIVE")
 	if elasticAPMActive {
 		cfg.Transport = apmelasticsearch.WrapRoundTripper(http.DefaultTransport)
@@ -120,6 +140,8 @@ func Search(ctx context.Context, indexName string, query map[string]interface{})
 	span, _ := apm.StartSpanOptions(ctx, "Search", "elasticsearch.search", apm.SpanOptions{
 		Parent: apm.SpanFromContext(ctx).TraceContext(),
 	})
+	span.Context.SetLabel("index", indexName)
+	span.Context.SetLabel("query", query)
 	defer span.End()
 
 	result := SearchResult{}
@@ -202,7 +224,7 @@ func WaitForElasticsearch(ctx context.Context, maxTimeoutMinutes time.Duration) 
 // WaitForElasticsearchFromHostPort waits for an elasticsearch running in a host:port to be healthy, returning false
 // if elasticsearch does not get healthy status in a defined number of minutes.
 func WaitForElasticsearchFromHostPort(ctx context.Context, host string, port int, maxTimeoutMinutes time.Duration) (bool, error) {
-	exp := common.GetExponentialBackOff(maxTimeoutMinutes)
+	exp := utils.GetExponentialBackOff(maxTimeoutMinutes)
 
 	retryCount := 1
 
@@ -251,7 +273,7 @@ func WaitForElasticsearchFromHostPort(ctx context.Context, host string, port int
 
 // WaitForIndices waits for the elasticsearch indices to return the list of indices.
 func WaitForIndices() (string, error) {
-	exp := common.GetExponentialBackOff(60 * time.Second)
+	exp := utils.GetExponentialBackOff(60 * time.Second)
 
 	retryCount := 1
 	body := ""
@@ -294,7 +316,7 @@ func WaitForIndices() (string, error) {
 // WaitForNumberOfHits waits for an elasticsearch query to return more than a number of hits,
 // returning false if the query does not reach that number in a defined number of time.
 func WaitForNumberOfHits(ctx context.Context, indexName string, query map[string]interface{}, desiredHits int, maxTimeout time.Duration) (SearchResult, error) {
-	exp := common.GetExponentialBackOff(maxTimeout)
+	exp := utils.GetExponentialBackOff(maxTimeout)
 
 	retryCount := 1
 	result := SearchResult{}

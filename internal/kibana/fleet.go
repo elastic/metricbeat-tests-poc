@@ -6,7 +6,11 @@ package kibana
 
 import (
 	"fmt"
+	"net"
+	"net/url"
+	"strconv"
 
+	"github.com/elastic/e2e-testing/internal/shell"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -24,6 +28,18 @@ type FleetConfig struct {
 
 // NewFleetConfig builds a new configuration for the fleet agent, defaulting fleet-server host, ES credentials, URI and port.
 func NewFleetConfig(token string) (*FleetConfig, error) {
+	fleetServer := shell.GetEnv("FLEET_URL", "fleet-server")
+	fleetPort := 8220
+	if fleetServer != "fleet-server" {
+		u, err := url.Parse(fleetServer)
+		host, port, err := net.SplitHostPort(u.Host)
+		if err != nil {
+			log.Fatal("Could not determine fleet port from FLEET_URL")
+		}
+		fleetPort, _ = strconv.Atoi(port)
+		fleetServer = host
+	}
+
 	cfg := &FleetConfig{
 		EnrollmentToken:          token,
 		ElasticsearchCredentials: "elastic:changeme",
@@ -31,8 +47,8 @@ func NewFleetConfig(token string) (*FleetConfig, error) {
 		ElasticsearchURI:         "elasticsearch",
 		KibanaPort:               5601,
 		KibanaURI:                "kibana",
-		FleetServerPort:          8220,
-		FleetServerURI:           "fleet-server",
+		FleetServerPort:          fleetPort,
+		FleetServerURI:           fleetServer,
 	}
 
 	log.WithFields(log.Fields{
@@ -46,17 +62,6 @@ func NewFleetConfig(token string) (*FleetConfig, error) {
 
 // Flags bootstrap flags for fleet server
 func (cfg FleetConfig) Flags() []string {
-	/*
-		// agent using an already bootstrapped fleet-server
-		fleetServerHost := "https://hostname_of_the_bootstrapped_fleet_server:8220"
-		return []string{
-			"-e", "-v", "--force", "--insecure",
-			// ensure the enrollment belongs to the default policy
-			"--enrollment-token=" + cfg.EnrollmentToken,
-			"--url", fleetServerHost,
-		}
-	*/
-
 	flags := []string{
 		"-e", "-v", "--force", "--insecure", "--enrollment-token=" + cfg.EnrollmentToken,
 		"--url", fmt.Sprintf("http://%s:%d", cfg.FleetServerURI, cfg.FleetServerPort),

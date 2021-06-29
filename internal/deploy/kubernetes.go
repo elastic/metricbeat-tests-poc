@@ -12,6 +12,8 @@ import (
 
 	"github.com/elastic/e2e-testing/internal/kubernetes"
 	"github.com/pkg/errors"
+	log "github.com/sirupsen/logrus"
+	"go.elastic.co/apm"
 )
 
 var cluster kubernetes.Cluster
@@ -27,11 +29,18 @@ func newK8sDeploy() Deployment {
 }
 
 // Add adds services deployment
-func (c *kubernetesDeploymentManifest) Add(services []string, env map[string]string) error {
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+func (c *kubernetesDeploymentManifest) Add(ctx context.Context, profile ServiceRequest, services []ServiceRequest, env map[string]string) error {
+	span, _ := apm.StartSpanOptions(ctx, "Adding services to kubernetes deployment", "kubernetes.manifest.add-services", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("profile", profile)
+	span.Context.SetLabel("services", services)
+	defer span.End()
+
+	kubectl = cluster.Kubectl().WithNamespace(ctx, getNamespaceFromProfile(profile))
 
 	for _, service := range services {
-		_, err := kubectl.Run(c.Context, "apply", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service))
+		_, err := kubectl.Run(ctx, "apply", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service.Name))
 		if err != nil {
 			return err
 		}
@@ -39,15 +48,43 @@ func (c *kubernetesDeploymentManifest) Add(services []string, env map[string]str
 	return nil
 }
 
+// AddFiles - add files to deployment service
+func (c *kubernetesDeploymentManifest) AddFiles(ctx context.Context, profile ServiceRequest, service ServiceRequest, files []string) error {
+	span, _ := apm.StartSpanOptions(ctx, "Adding files to kubernetes deployment", "kubernetes.files.add", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("files", files)
+	span.Context.SetLabel("profile", profile)
+	span.Context.SetLabel("service", service)
+	defer span.End()
+
+	container, _ := c.Inspect(ctx, service)
+	kubectl = cluster.Kubectl().WithNamespace(ctx, getNamespaceFromProfile(profile))
+
+	for _, file := range files {
+		_, err := kubectl.Run(ctx, "cp", file, fmt.Sprintf("deployment/%s:.", container.Name))
+		if err != nil {
+			log.WithField("error", err).Fatal("Unable to copy file to service")
+		}
+	}
+	return nil
+}
+
 // Bootstrap sets up environment with kind
-func (c *kubernetesDeploymentManifest) Bootstrap(waitCB func() error) error {
-	err := cluster.Initialize(c.Context, "../../../cli/config/kubernetes/kind.yaml")
+func (c *kubernetesDeploymentManifest) Bootstrap(ctx context.Context, profile ServiceRequest, env map[string]string, waitCB func() error) error {
+	span, _ := apm.StartSpanOptions(ctx, "Bootstrapping kubernetes deployment", "kubernetes.manifest.bootstrap", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	defer span.End()
+
+	err := cluster.Initialize(ctx, "../../../cli/config/kubernetes/kind.yaml")
 	if err != nil {
 		return err
 	}
 
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
-	_, err = kubectl.Run(c.Context, "apply", "-k", "../../../cli/config/kubernetes/base")
+	// TODO: we would need to understand how to pass the environment argument to anything running in the namespace
+	kubectl = cluster.Kubectl().WithNamespace(ctx, getNamespaceFromProfile(profile))
+	_, err = kubectl.Run(ctx, "apply", "-k", "../../../cli/config/kubernetes/base")
 	if err != nil {
 		return err
 	}
@@ -59,20 +96,33 @@ func (c *kubernetesDeploymentManifest) Bootstrap(waitCB func() error) error {
 }
 
 // Destroy teardown kubernetes environment
-func (c *kubernetesDeploymentManifest) Destroy() error {
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+func (c *kubernetesDeploymentManifest) Destroy(ctx context.Context, profile ServiceRequest) error {
+	span, _ := apm.StartSpanOptions(ctx, "Destroying kubernetes deployment", "kubernetes.manifest.destroy", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	defer span.End()
+
+	kubectl = cluster.Kubectl().WithNamespace(ctx, getNamespaceFromProfile(profile))
 	cluster.Cleanup(c.Context)
 	return nil
 }
 
 // ExecIn execute command in service
-func (c *kubernetesDeploymentManifest) ExecIn(service string, cmd []string) (string, error) {
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
-	args := []string{"exec", "deployment/" + service, "--"}
+func (c *kubernetesDeploymentManifest) ExecIn(ctx context.Context, profile ServiceRequest, service ServiceRequest, cmd []string) (string, error) {
+	span, _ := apm.StartSpanOptions(ctx, "Executing command in kubernetes deployment", "kubernetes.manifest.execIn", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("profile", profile)
+	span.Context.SetLabel("service", service)
+	span.Context.SetLabel("arguments", cmd)
+	defer span.End()
+
+	kubectl = cluster.Kubectl().WithNamespace(ctx, getNamespaceFromProfile(profile))
+	args := []string{"exec", "deployment/" + service.Name, "--"}
 	for _, arg := range cmd {
 		args = append(cmd, arg)
 	}
-	output, err := kubectl.Run(c.Context, args...)
+	output, err := kubectl.Run(ctx, args...)
 	if err != nil {
 		return "", err
 	}
@@ -87,9 +137,15 @@ type kubernetesServiceManifest struct {
 }
 
 // Inspect inspects a service
-func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest, error) {
-	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
-	out, err := kubectl.Run(c.Context, "get", "deployment/"+service, "-o", "json")
+func (c *kubernetesDeploymentManifest) Inspect(ctx context.Context, service ServiceRequest) (*ServiceManifest, error) {
+	span, _ := apm.StartSpanOptions(ctx, "Inspecting kubernetes deployment", "kubernetes.manifest.inspect", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("service", service)
+	defer span.End()
+
+	kubectl = cluster.Kubectl().WithNamespace(ctx, "default")
+	out, err := kubectl.Run(ctx, "get", "deployment/"+service.Name, "-o", "json")
 	if err != nil {
 		return &ServiceManifest{}, err
 	}
@@ -100,20 +156,60 @@ func (c *kubernetesDeploymentManifest) Inspect(service string) (*ServiceManifest
 	return &ServiceManifest{
 		ID:         inspect.Metadata.ID,
 		Name:       strings.TrimPrefix(inspect.Metadata.Name, "/"),
-		Connection: service,
-		Hostname:   service,
+		Connection: service.Name,
+		Hostname:   service.Name,
+		Alias:      service.Name,
+		Platform:   "linux",
 	}, nil
 }
 
-// Remove remove services from deployment
-func (c *kubernetesDeploymentManifest) Remove(services []string, env map[string]string) error {
+// Logs print logs of service
+func (c *kubernetesDeploymentManifest) Logs(service ServiceRequest) error {
 	kubectl = cluster.Kubectl().WithNamespace(c.Context, "default")
+	_, err := kubectl.Run(c.Context, "logs", "deployment/"+service.Name)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"error":   err,
+			"service": service.Name,
+		}).Error("Could not retrieve Elastic Agent logs")
+
+		return err
+	}
+	return nil
+}
+
+// PreBootstrap sets up environment with kind
+func (c *kubernetesDeploymentManifest) PreBootstrap(ctx context.Context) error {
+	return nil
+}
+
+// Remove remove services from deployment
+func (c *kubernetesDeploymentManifest) Remove(profile ServiceRequest, services []ServiceRequest, env map[string]string) error {
+	kubectl = cluster.Kubectl().WithNamespace(c.Context, getNamespaceFromProfile(profile))
 
 	for _, service := range services {
-		_, err := kubectl.Run(c.Context, "delete", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service))
+		_, err := kubectl.Run(c.Context, "delete", "-k", fmt.Sprintf("../../../cli/config/kubernetes/overlays/%s", service.Name))
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// Start a container
+func (c *kubernetesDeploymentManifest) Start(service ServiceRequest) error {
+	return nil
+}
+
+// Stop a container
+func (c *kubernetesDeploymentManifest) Stop(service ServiceRequest) error {
+	return nil
+}
+
+func getNamespaceFromProfile(profile ServiceRequest) string {
+	if profile.Name == "" {
+		return "default"
+	}
+
+	return profile.GetName()
 }

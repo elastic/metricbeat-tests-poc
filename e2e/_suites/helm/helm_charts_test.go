@@ -7,15 +7,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
+	"testing"
 	"time"
 
 	"github.com/Jeffail/gabs/v2"
 	"github.com/cenkalti/backoff/v4"
 	"github.com/elastic/e2e-testing/cli/config"
-	"github.com/elastic/e2e-testing/e2e/steps"
 	"github.com/elastic/e2e-testing/internal/common"
-	"github.com/elastic/e2e-testing/internal/compose"
 	"github.com/elastic/e2e-testing/internal/helm"
 	"github.com/elastic/e2e-testing/internal/kubectl"
 	"github.com/elastic/e2e-testing/internal/shell"
@@ -23,17 +23,11 @@ import (
 	"go.elastic.co/apm"
 
 	"github.com/cucumber/godog"
+	"github.com/cucumber/godog/colors"
 	messages "github.com/cucumber/messages-go/v10"
 	log "github.com/sirupsen/logrus"
+	flag "github.com/spf13/pflag"
 )
-
-// developerMode tears down the backend services (the k8s cluster)
-// after a test suite. This is the desired behavior, but when developing, we maybe want to keep
-// them running to speed up the development cycle.
-// It can be overriden by the DEVELOPER_MODE env var
-var developerMode = false
-
-var elasticAPMActive = false
 
 var helmManager helm.Manager
 
@@ -49,10 +43,6 @@ var helmChartVersion = "7.11.2"
 // kubernetesVersion represents the default version used for Kubernetes
 var kubernetesVersion = "1.18.2"
 
-// stackVersion is the version of the stack to use
-// It can be overriden by STACK_VERSION env var
-var stackVersion = "8.0.0-SNAPSHOT"
-
 var testSuite HelmChartTestSuite
 
 var tx *apm.Transaction
@@ -61,31 +51,11 @@ var stepSpan *apm.Span
 func setupSuite() {
 	config.Init()
 
-	developerMode = shell.GetEnvBool("DEVELOPER_MODE")
-	if developerMode {
-		log.Info("Running in Developer mode 💻: runtime dependencies between different test runs will be reused to speed up dev cycle")
-	}
-
-	elasticAPMActive = shell.GetEnvBool("ELASTIC_APM_ACTIVE")
-	if elasticAPMActive {
-		log.WithFields(log.Fields{
-			"apm-environment": shell.GetEnv("ELASTIC_APM_ENVIRONMENT", "local"),
-		}).Info("Current execution will be instrumented 🛠")
-	}
-
 	helmVersion = shell.GetEnv("HELM_VERSION", helmVersion)
 	helmChartVersion = shell.GetEnv("HELM_CHART_VERSION", helmChartVersion)
 	kubernetesVersion = shell.GetEnv("KUBERNETES_VERSION", kubernetesVersion)
 
-	stackVersion = shell.GetEnv("STACK_VERSION", stackVersion)
-	v, err := utils.GetElasticArtifactVersion(stackVersion)
-	if err != nil {
-		log.WithFields(log.Fields{
-			"error":   err,
-			"version": stackVersion,
-		}).Fatal("Failed to get stack version, aborting")
-	}
-	stackVersion = v
+	common.InitVersions()
 
 	h, err := helm.Factory(helmVersion)
 	if err != nil {
@@ -182,9 +152,9 @@ func (ts *HelmChartTestSuite) aResourceWillExposePods(resourceType string) error
 		return err
 	}
 
-	maxTimeout := time.Duration(common.TimeoutFactor) * time.Minute
+	maxTimeout := time.Duration(utils.TimeoutFactor) * time.Minute
 
-	exp := common.GetExponentialBackOff(maxTimeout)
+	exp := utils.GetExponentialBackOff(maxTimeout)
 	retryCount := 1
 
 	checkEndpointsFn := func() error {
@@ -407,7 +377,7 @@ func (ts *HelmChartTestSuite) install(ctx context.Context, chart string) error {
 			"chart": ts.Name,
 		}).Info("Rancher Local Path Provisioner and local-path storage class for Elasticsearch volumes installed")
 
-		maxTimeout := common.TimeoutFactor * 100
+		maxTimeout := utils.TimeoutFactor * 100
 
 		log.Debug("Applying workaround to use Rancher's local-path storage class for Elasticsearch volumes")
 		flags = []string{"--wait", fmt.Sprintf("--timeout=%ds", maxTimeout), "--values", "https://raw.githubusercontent.com/elastic/helm-charts/master/elasticsearch/examples/kubernetes-kind/values.yaml"}
@@ -613,7 +583,14 @@ func InitializeHelmChartScenario(ctx *godog.ScenarioContext) {
 		tx.Context.SetLabel("suite", "helm")
 	})
 
-	ctx.AfterScenario(func(*messages.Pickle, error) {
+	ctx.AfterScenario(func(p *messages.Pickle, err error) {
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("scenario", p.GetName())
+			e.Context.SetLabel("gherkin_type", "scenario")
+			e.Send()
+		}
+
 		f := func() {
 			tx.End()
 
@@ -630,6 +607,13 @@ func InitializeHelmChartScenario(ctx *godog.ScenarioContext) {
 		testSuite.currentContext = apm.ContextWithSpan(context.Background(), stepSpan)
 	})
 	ctx.AfterStep(func(st *godog.Step, err error) {
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("step", st.GetText())
+			e.Context.SetLabel("gherkin_type", "step")
+			e.Send()
+		}
+
 		if stepSpan != nil {
 			stepSpan.End()
 		}
@@ -670,23 +654,6 @@ func InitializeHelmChartTestSuite(ctx *godog.TestSuiteContext) {
 		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
 		defer suiteParentSpan.End()
 
-		elasticAPMEnvironment := shell.GetEnv("ELASTIC_APM_ENVIRONMENT", "ci")
-		if elasticAPMActive && elasticAPMEnvironment == "local" {
-			serviceManager := compose.NewServiceManager()
-
-			env := map[string]string{
-				"stackVersion": stackVersion,
-			}
-
-			err := serviceManager.RunCompose(suiteContext, true, []string{"helm"}, env)
-			if err != nil {
-				log.WithFields(log.Fields{
-					"profile": "metricbeat",
-				}).Warn("Could not run the profile.")
-			}
-			steps.AddAPMServicesForInstrumentation(suiteContext, "helm", stackVersion, true, env)
-		}
-
 		err := testSuite.createCluster(suiteContext, testSuite.KubernetesVersion)
 		if err != nil {
 			return
@@ -718,21 +685,11 @@ func InitializeHelmChartTestSuite(ctx *godog.TestSuiteContext) {
 		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
 		defer suiteParentSpan.End()
 
-		if !developerMode {
+		if !common.DeveloperMode {
 			log.Trace("After Suite...")
 			err := testSuite.destroyCluster(suiteContext)
 			if err != nil {
 				return
-			}
-
-			if elasticAPMActive {
-				serviceManager := compose.NewServiceManager()
-				err := serviceManager.StopCompose(suiteContext, true, []string{"helm"})
-				if err != nil {
-					log.WithFields(log.Fields{
-						"profile": "helm",
-					}).Error("Could not stop the profile.")
-				}
 			}
 		}
 	})
@@ -748,4 +705,32 @@ func toolsAreInstalled() {
 	}
 
 	shell.CheckInstalledSoftware(binaries...)
+}
+
+var opts = godog.Options{
+	Output: colors.Colored(os.Stdout),
+	Format: "progress", // can define default values
+}
+
+func init() {
+	godog.BindCommandLineFlags("godog.", &opts) // godog v0.11.0 (latest)
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	opts.Paths = flag.Args()
+
+	status := godog.TestSuite{
+		Name:                 "godogs",
+		TestSuiteInitializer: InitializeHelmChartTestSuite,
+		ScenarioInitializer:  InitializeHelmChartScenario,
+		Options:              &opts,
+	}.Run()
+
+	// Optional: Run `testing` package's logic besides godog.
+	if st := m.Run(); st > status {
+		status = st
+	}
+
+	os.Exit(status)
 }

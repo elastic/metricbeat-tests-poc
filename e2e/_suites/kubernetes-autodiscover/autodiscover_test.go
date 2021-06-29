@@ -14,17 +14,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"testing"
 	"text/template"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
 	"github.com/cucumber/godog"
+	"github.com/cucumber/godog/colors"
 	messages "github.com/cucumber/messages-go/v10"
 	log "github.com/sirupsen/logrus"
+	flag "github.com/spf13/pflag"
+	"go.elastic.co/apm"
 
 	"github.com/elastic/e2e-testing/cli/config"
 	"github.com/elastic/e2e-testing/internal/common"
-	"github.com/elastic/e2e-testing/internal/docker"
+	"github.com/elastic/e2e-testing/internal/deploy"
 	"github.com/elastic/e2e-testing/internal/kubernetes"
 	"github.com/elastic/e2e-testing/internal/shell"
 	"github.com/elastic/e2e-testing/internal/utils"
@@ -32,10 +36,11 @@ import (
 
 var beatVersions = map[string]string{}
 
-const defaultBeatVersion = "8.0.0-SNAPSHOT"
-
 var defaultEventsWaitTimeout = 60 * time.Second
 var defaultDeployWaitTimeout = 60 * time.Second
+
+var tx *apm.Transaction
+var stepSpan *apm.Span
 
 type podsManager struct {
 	kubectl kubernetes.Control
@@ -43,6 +48,13 @@ type podsManager struct {
 }
 
 func (m *podsManager) executeTemplateFor(podName string, writer io.Writer, options []string) error {
+	span, _ := apm.StartSpanOptions(m.ctx, "Executing template for pod", "pod.template.execute", apm.SpanOptions{
+		Parent: apm.SpanFromContext(m.ctx).TraceContext(),
+	})
+	span.Context.SetLabel("pod", podName)
+	span.Context.SetLabel("options", options)
+	defer span.End()
+
 	path := filepath.Join("testdata/templates", sanitizeName(podName)+".yml.tmpl")
 
 	err := m.configureDockerImage(podName)
@@ -107,38 +119,39 @@ func (m *podsManager) configureDockerImage(podName string) error {
 		return nil
 	}
 
+	span, _ := apm.StartSpanOptions(m.ctx, "Configuring Docker image", "pod.docker-image.configure", apm.SpanOptions{
+		Parent: apm.SpanFromContext(m.ctx).TraceContext(),
+	})
+	span.Context.SetLabel("pod", podName)
+	defer span.End()
+
 	// we are caching the versions by pod to avoid downloading and loading/tagging the Docker image multiple times
 	if beatVersions[podName] != "" {
 		log.Tracef("The beat version was already loaded: %s", beatVersions[podName])
 		return nil
 	}
 
-	beatVersion := shell.GetEnv("BEAT_VERSION", defaultBeatVersion)
+	beatVersion := common.BeatVersion + "-amd64"
 
 	useCISnapshots := shell.GetEnvBool("BEATS_USE_CI_SNAPSHOTS")
 	beatsLocalPath := shell.GetEnv("BEATS_LOCAL_PATH", "")
 	if useCISnapshots || beatsLocalPath != "" {
 		log.Debugf("Configuring Docker image for %s", podName)
 
-		// this method will detect if the GITHUB_CHECK_SHA1 variable is set
-		artifactName := utils.BuildArtifactName(podName, beatVersion, defaultBeatVersion, "linux", "amd64", "tar.gz", true)
-
-		imagePath, err := utils.FetchBeatsBinary(artifactName, podName, beatVersion, defaultBeatVersion, common.TimeoutFactor, true)
+		_, imagePath, err := utils.FetchElasticArtifact(m.ctx, podName, common.BeatVersion, "linux", "amd64", "tar.gz", true, true)
 		if err != nil {
 			return err
 		}
 
 		// load the TAR file into the docker host as a Docker image
-		err = docker.LoadImage(imagePath)
+		err = deploy.LoadImage(imagePath)
 		if err != nil {
 			return err
 		}
 
-		beatVersion = beatVersion + "-amd64"
-
 		// tag the image with the proper docker tag, including platform
-		err = docker.TagImage(
-			"docker.elastic.co/beats/"+podName+":"+defaultBeatVersion,
+		err = deploy.TagImage(
+			"docker.elastic.co/beats/"+podName+":"+common.BeatVersionBase,
 			"docker.elastic.co/observability-ci/"+podName+":"+beatVersion,
 		)
 		if err != nil {
@@ -204,6 +217,14 @@ func (m *podsManager) isRunning(podName string, options []string) error {
 }
 
 func (m *podsManager) resourceIs(podName string, state string, options ...string) error {
+	span, _ := apm.StartSpanOptions(m.ctx, "Checking resource state", "pod.state.check", apm.SpanOptions{
+		Parent: apm.SpanFromContext(m.ctx).TraceContext(),
+	})
+	span.Context.SetLabel("options", options)
+	span.Context.SetLabel("pod", podName)
+	span.Context.SetLabel("state", state)
+	defer span.End()
+
 	switch state {
 	case "running":
 		return m.isRunning(podName, options)
@@ -264,7 +285,7 @@ func (m *podsManager) collectsEventsWith(podName string, condition string) error
 	}
 
 	return m.waitForEventsCondition(podName, func(ctx context.Context, localPath string) (bool, error) {
-		ok, err := containsEventsWith(localPath, condition)
+		ok, err := containsEventsWith(m.ctx, localPath, condition)
 		if ok {
 			return true, nil
 		}
@@ -287,7 +308,7 @@ func (m *podsManager) doesNotCollectEvents(podName, condition, duration string) 
 	}
 
 	return m.waitForEventsCondition(podName, func(ctx context.Context, localPath string) (bool, error) {
-		events, err := readEventsWith(localPath, condition)
+		events, err := readEventsWith(m.ctx, localPath, condition)
 		if err != nil {
 			return false, err
 		}
@@ -320,6 +341,12 @@ func (m *podsManager) doesNotCollectEvents(podName, condition, duration string) 
 }
 
 func (m *podsManager) waitForEventsCondition(podName string, conditionFn func(ctx context.Context, localPath string) (bool, error)) error {
+	span, _ := apm.StartSpanOptions(m.ctx, "Waiting for events conditions", "pod.events.waitForCondition", apm.SpanOptions{
+		Parent: apm.SpanFromContext(m.ctx).TraceContext(),
+	})
+	span.Context.SetLabel("pod", podName)
+	defer span.End()
+
 	ctx, cancel := context.WithTimeout(m.ctx, defaultEventsWaitTimeout)
 	defer cancel()
 
@@ -352,6 +379,12 @@ func (m *podsManager) waitForEventsCondition(podName string, conditionFn func(ct
 }
 
 func (m *podsManager) getPodInstances(ctx context.Context, podName string) (instances []string, err error) {
+	span, _ := apm.StartSpanOptions(m.ctx, "Getting pod instances", "pod.instances.get", apm.SpanOptions{
+		Parent: apm.SpanFromContext(m.ctx).TraceContext(),
+	})
+	span.Context.SetLabel("pod", podName)
+	defer span.End()
+
 	app := sanitizeName(podName)
 	ticker := backoff.WithContext(backoff.NewConstantBackOff(1*time.Second), ctx)
 	err = backoff.Retry(func() error {
@@ -395,15 +428,22 @@ func flattenMap(m map[string]interface{}) map[string]interface{} {
 	return flattened
 }
 
-func containsEventsWith(path string, condition string) (bool, error) {
-	events, err := readEventsWith(path, condition)
+func containsEventsWith(ctx context.Context, path string, condition string) (bool, error) {
+	events, err := readEventsWith(ctx, path, condition)
 	if err != nil {
 		return false, err
 	}
 	return len(events) > 0, nil
 }
 
-func readEventsWith(path string, condition string) ([]map[string]interface{}, error) {
+func readEventsWith(ctx context.Context, path string, condition string) ([]map[string]interface{}, error) {
+	span, _ := apm.StartSpanOptions(ctx, "Reading events", "kubernetes.events.read", apm.SpanOptions{
+		Parent: apm.SpanFromContext(ctx).TraceContext(),
+	})
+	span.Context.SetLabel("condition", condition)
+	span.Context.SetLabel("path", path)
+	defer span.End()
+
 	key, value, ok := splitCondition(condition)
 	if !ok {
 		return nil, fmt.Errorf("invalid condition '%s'", condition)
@@ -464,11 +504,27 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 		// init logger
 		config.Init()
 
-		defaultEventsWaitTimeout = defaultEventsWaitTimeout * time.Duration(common.TimeoutFactor)
-		defaultDeployWaitTimeout = defaultDeployWaitTimeout * time.Duration(common.TimeoutFactor)
+		common.InitVersions()
+
+		defaultEventsWaitTimeout = defaultEventsWaitTimeout * time.Duration(utils.TimeoutFactor)
+		defaultDeployWaitTimeout = defaultDeployWaitTimeout * time.Duration(utils.TimeoutFactor)
+
+		var suiteTx *apm.Transaction
+		var suiteParentSpan *apm.Span
+
+		// instrumentation
+		defer apm.DefaultTracer.Flush(nil)
+		suiteTx = apm.DefaultTracer.StartTransaction("Initialise k8s Autodiscover", "test.suite")
+		defer suiteTx.End()
+		suiteParentSpan = suiteTx.StartSpan("Before k8s Autodiscover test suite", "test.suite.before", nil)
+		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
+		defer suiteParentSpan.End()
 
 		err := cluster.Initialize(suiteContext, "testdata/kind.yml")
 		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Send()
+
 			log.WithError(err).Fatal("Failed to initialize cluster")
 		}
 		log.DeferExitHandler(func() {
@@ -477,6 +533,21 @@ func InitializeTestSuite(ctx *godog.TestSuiteContext) {
 	})
 
 	ctx.AfterSuite(func() {
+		f := func() {
+			apm.DefaultTracer.Flush(nil)
+		}
+		defer f()
+
+		// instrumentation
+		var suiteTx *apm.Transaction
+		var suiteParentSpan *apm.Span
+		defer apm.DefaultTracer.Flush(nil)
+		suiteTx = apm.DefaultTracer.StartTransaction("Tear Down k8s Autodiscover", "test.suite")
+		defer suiteTx.End()
+		suiteParentSpan = suiteTx.StartSpan("After k8s Autodiscover test suite", "test.suite.after", nil)
+		suiteContext = apm.ContextWithSpan(suiteContext, suiteParentSpan)
+		defer suiteParentSpan.End()
+
 		cluster.Cleanup(suiteContext)
 		cancel()
 	})
@@ -489,6 +560,9 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	var kubectl kubernetes.Control
 	var pods podsManager
 	ctx.BeforeScenario(func(p *messages.Pickle) {
+		tx = apm.DefaultTracer.StartTransaction(p.GetName(), "test.scenario")
+		tx.Context.SetLabel("suite", "k8s Autodiscover")
+
 		kubectl = cluster.Kubectl().WithNamespace(scenarioCtx, "")
 		if kubectl.Namespace != "" {
 			log.Debugf("Running scenario %s in namespace: %s", p.Name, kubectl.Namespace)
@@ -497,9 +571,40 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 		pods.ctx = scenarioCtx
 		log.DeferExitHandler(func() { kubectl.Cleanup(scenarioCtx) })
 	})
-	ctx.AfterScenario(func(*messages.Pickle, error) {
+	ctx.AfterScenario(func(p *messages.Pickle, err error) {
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("scenario", p.GetName())
+			e.Context.SetLabel("gherkin_type", "scenario")
+			e.Send()
+		}
+
+		f := func() {
+			tx.End()
+
+			apm.DefaultTracer.Flush(nil)
+		}
+		defer f()
+
 		kubectl.Cleanup(scenarioCtx)
 		cancel()
+	})
+
+	ctx.BeforeStep(func(step *godog.Step) {
+		stepSpan = tx.StartSpan(step.GetText(), "test.scenario.step", nil)
+		pods.ctx = apm.ContextWithSpan(scenarioCtx, stepSpan)
+	})
+	ctx.AfterStep(func(st *godog.Step, err error) {
+		if err != nil {
+			e := apm.DefaultTracer.NewError(err)
+			e.Context.SetLabel("step", st.GetText())
+			e.Context.SetLabel("gherkin_type", "step")
+			e.Send()
+		}
+
+		if stepSpan != nil {
+			stepSpan.End()
+		}
 	})
 
 	ctx.Step(`^"([^"]*)" have passed$`, func(d string) error { return waitDuration(scenarioCtx, d) })
@@ -514,4 +619,32 @@ func InitializeScenario(ctx *godog.ScenarioContext) {
 	ctx.Step(`^"([^"]*)" collects events with "([^"]*:[^"]*)"$`, pods.collectsEventsWith)
 	ctx.Step(`^"([^"]*)" does not collect events with "([^"]*)" during "([^"]*)"$`, pods.doesNotCollectEvents)
 	ctx.Step(`^an ephemeral container is started in "([^"]*)"$`, pods.startEphemeralContainerIn)
+}
+
+var opts = godog.Options{
+	Output: colors.Colored(os.Stdout),
+	Format: "progress", // can define default values
+}
+
+func init() {
+	godog.BindCommandLineFlags("godog.", &opts) // godog v0.11.0 (latest)
+}
+
+func TestMain(m *testing.M) {
+	flag.Parse()
+	opts.Paths = flag.Args()
+
+	status := godog.TestSuite{
+		Name:                 "godogs",
+		TestSuiteInitializer: InitializeTestSuite,
+		ScenarioInitializer:  InitializeScenario,
+		Options:              &opts,
+	}.Run()
+
+	// Optional: Run `testing` package's logic besides godog.
+	if st := m.Run(); st > status {
+		status = st
+	}
+
+	os.Exit(status)
 }
