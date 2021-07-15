@@ -177,8 +177,8 @@ func (fts *FleetTestSuite) contributeSteps(s *godog.ScenarioContext) {
 	s.Step(`^the policy will reflect the change in the Security App$`, fts.thePolicyWillReflectTheChangeInTheSecurityApp)
 
 	// System Integration steps
-	s.Step(`^the policy is updated to have "([^"]*)" set to "([^"]*)"$`, fts.thePolicyIsUpdatedToHaveSystemSet)
-	s.Step(`^"([^"]*)" with "([^"]*)" metrics are present in the datastreams$`, fts.theMetricsInTheDataStream)
+	s.Step(`^the policy is updated to have "([^"]*)" set to "([^"]*)" for a "([^"]*)" agent$`, fts.thePolicyIsUpdatedToHaveSystemSet)
+	s.Step(`^"([^"]*)" with "([^"]*)" metrics are present in the datastreams for a "([^"]*)" agent$`, fts.theMetricsInTheDataStream)
 
 	// stand-alone only steps
 	s.Step(`^a "([^"]*)" stand-alone agent is deployed$`, fts.aStandaloneAgentIsDeployed)
@@ -1242,7 +1242,7 @@ func readJSONFile(file string, integration string, set string) []interface{} {
 	return nil
 }
 
-func (fts *FleetTestSuite) thePolicyIsUpdatedToHaveSystemSet(name string, set string) error {
+func (fts *FleetTestSuite) thePolicyIsUpdatedToHaveSystemSet(name string, set string, os string) error {
 	var condition = false
 	if name != "system/metrics" {
 		condition = true
@@ -1293,12 +1293,13 @@ func (fts *FleetTestSuite) thePolicyIsUpdatedToHaveSystemSet(name string, set st
 		"dataset": "system." + set,
 		"enabled": "true",
 		"type":    "metrics",
+		"os":      os,
 	}).Info("Policy Updated with package name system." + set)
 
 	return nil
 }
 
-func (fts *FleetTestSuite) theMetricsInTheDataStream(name string, set string) error {
+func (fts *FleetTestSuite) theMetricsInTheDataStream(name string, set string, os string) error {
 	var TimeoutFactor = 3
 	timeNow := time.Now()
 	startTime := timeNow.Unix()
@@ -1313,12 +1314,14 @@ func (fts *FleetTestSuite) theMetricsInTheDataStream(name string, set string) er
 					"dataset": "system." + set,
 					"enabled": "true",
 					"type":    name,
-				}).Info("The " + name + "with value system." + set + " in the metrics")
+					"os":      os,
+				}).Info("The " + name + " with value system." + set + " in the metrics")
 
 				if int64(int64(item.Path("last_activity_ms").Data().(float64))) > startTime {
-					log.WithField(
-						"Activity Time stamp for the "+name+"system."+name, "Is valid",
-					).Info("The " + name + "with value system." + set + " in the metrics")
+					log.WithFields(log.Fields{
+						"Activity Time stamp for the system." + name: "Is valid",
+						"os": os,
+					}).Info("The " + name + " with value system." + set + " in the metrics")
 				}
 				exist = true
 				break
